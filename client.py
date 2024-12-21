@@ -23,10 +23,10 @@ UNIT = 0x1
 class Setting:
     private_key: str
     public_key: str
-    client_public_key: str
+    server_public_key: str
 
     @classmethod
-    def from_json(cls, path='server_settings.json'):
+    def from_json(cls, path='client_settings.json'):
         with open(path) as f:
             data = json.load(f)
         return cls(**data)
@@ -131,5 +131,5 @@ def run_sync_client(settings):
 
 
 if __name__ == "__main__":
-    settings = Setting.from_json('server_settings.json')
+    settings = Setting.from_json('client_settings.json')
     run_sync_client(settings)
