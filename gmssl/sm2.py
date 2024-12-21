@@ -192,7 +192,7 @@ class CryptSM2(object):
         x = int(P1[0:self.para_len], 16)
         return r == ((e + x) % int(self.ecc_table['n'], base=16))
 
-    def sign(self, data, K):
+    def sign(self, data, K=None):
         """
         签名函数, data消息的hash，private_key私钥，K随机数，均为16进制字符串
         :param self: 
@@ -200,6 +200,8 @@ class CryptSM2(object):
         :param K: K随机数
         :return: 
         """
+        if K is None:
+            K = func.random_hex(self.para_len)
         E = data.hex()  # 消息转化为16进制字符串
         e = int(E, 16)
 

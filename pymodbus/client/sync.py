@@ -234,7 +234,7 @@ class ModbusTcpClient(BaseModbusClient):
             server_response = self.socket.recv(1024)
 
             # 使用 SM2 验证服务器身份（验证 R1 的签名）
-            sm2_crypto = sm2.CryptSM2(public_key=self.framer.certificate_key)
+            sm2_crypto = sm2.CryptSM2(public_key=self.framer.certificate_key, private_key="")
             server_sign = server_response[8:]
             print("Client received server's signature on R1:", server_sign)
 

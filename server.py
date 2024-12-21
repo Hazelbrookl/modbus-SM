@@ -113,8 +113,8 @@ def run_server(settings):
     # run the server you want
     # ----------------------------------------------------------------------- #
     # Tcp:
-    StartTcpServer(context, identity=identity, address=(SERVER_HOST, SERVER_PORT))
-    #StartTcpServer(context, identity=identity, address=(SERVER_HOST, SERVER_PORT), private_key=settings.private_key, public_key=settings.public_key, trusted_key=settings.known_host[0]['public_key'])
+    #StartTcpServer(context, identity=identity, address=(SERVER_HOST, SERVER_PORT))
+    StartTcpServer(context, identity=identity, address=(SERVER_HOST, SERVER_PORT), private_key=settings.private_key, public_key=settings.public_key, certificate_key=settings.client_public_key)
 
 
 if __name__ == '__main__':

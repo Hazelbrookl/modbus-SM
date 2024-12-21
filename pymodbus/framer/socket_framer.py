@@ -188,7 +188,7 @@ class ModbusSocketFramer(ModbusFramer):
             # 数据部分
             data = data[:-64]
             print("Signature:", sign)
-            cpr = sm2.CryptSM2(public_key=self.trusted_public_key)
+            cpr = sm2.CryptSM2(public_key=self.certificate_key, private_key="")
             if not cpr.verify_with_sm3(sign, data):
                 raise InvalidMessageReceivedException('Unverified')
             print("Verified")

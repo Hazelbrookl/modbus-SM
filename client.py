@@ -34,7 +34,7 @@ class Setting:
 
 def run_sync_client(settings):
 
-    client = ModbusClient(SERVER_HOST, port=SERVER_PORT, private_key=settings.private_key, public_key=settings.public_key, trusted_key=settings.server_public_key)
+    client = ModbusClient(SERVER_HOST, port=SERVER_PORT, private_key=settings.private_key, public_key=settings.public_key, certificate_key=settings.server_public_key)
     client.connect()
 
     # ------------------------------------------------------------------------#

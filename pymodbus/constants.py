@@ -112,6 +112,7 @@ class Defaults(Singleton):
       legacy behavior for existing pymodbus users.
 
     '''
+    iv                  = b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     Port                = 502
     TLSPort             = 802
     Backoff             = 0.3

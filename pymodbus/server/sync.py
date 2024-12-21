@@ -208,7 +208,7 @@ class ModbusConnectedRequestHandler(ModbusBaseRequestHandler):
 
         # ---------------------------- Verify Client Identity -------------------
         # 使用 SM2 公钥验证客户端身份
-        sm2_crypto = sm2.CryptSM2(public_key=self.framer.certificate_key)
+        sm2_crypto = sm2.CryptSM2(public_key=self.framer.certificate_key, private_key="")
         client_sign = self.request.recv(1024)
 
         # 验证客户端身份，若验证失败则拒绝访问
@@ -409,6 +409,7 @@ class ModbusTcpServer(socketserver.ThreadingTCPServer):
                                            Defaults.broadcast_enable)
         self.private_key = private_key
         self.public_key = public_key
+        self.sm4_key = None
         self.certificate_key = certificate_key
 
         if isinstance(identity, ModbusDeviceIdentification):
