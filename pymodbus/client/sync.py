@@ -4,6 +4,8 @@ import serial
 import time
 import ssl
 import sys
+import random
+import secrets
 from functools import partial
 from pymodbus.constants import Defaults
 from pymodbus.utilities import hexlify_packets, ModbusTransactionState
@@ -16,6 +18,7 @@ from pymodbus.transaction import ModbusSocketFramer, ModbusBinaryFramer
 from pymodbus.transaction import ModbusAsciiFramer, ModbusRtuFramer
 from pymodbus.transaction import ModbusTlsFramer
 from pymodbus.client.common import ModbusClientMixin
+from gmssl import sm2, sm3, sm4
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -182,7 +185,7 @@ class ModbusTcpClient(BaseModbusClient):
     """
 
     def __init__(self, host='127.0.0.1', port=Defaults.Port,
-        framer=ModbusSocketFramer, **kwargs):
+        framer=ModbusSocketFramer, private_key=None, public_key=None, certificate_key=None, **kwargs):
         """ Initialize a client instance
 
         :param host: The host to connect to (default 127.0.0.1)
@@ -198,7 +201,10 @@ class ModbusTcpClient(BaseModbusClient):
         self.source_address = kwargs.get('source_address', ('', 0))
         self.socket = None
         self.timeout = kwargs.get('timeout',  Defaults.Timeout)
-        BaseModbusClient.__init__(self, framer(ClientDecoder(), self), **kwargs)
+        BaseModbusClient.__init__(self, framer(ClientDecoder(), self, 
+                                               private_key=private_key, 
+                                               public_key=public_key,
+                                               certificate_key=certificate_key), **kwargs)
 
     def connect(self):
         """ Connect to the modbus tcp server
@@ -214,6 +220,88 @@ class ModbusTcpClient(BaseModbusClient):
                 source_address=self.source_address)
             _logger.debug("Connection to Modbus server established. "
                           "Socket {}".format(self.socket.getsockname()))
+                    
+                    # ---------------------------- Authorization ----------------------------
+            print("----- Authorization ---------------------------------------------------")
+            start_time = time.time()
+
+            # 生成客户端随机数 R1，并发送给服务器
+            client_random = random.randrange(1e10).to_bytes(8, byteorder="little", signed=False)
+            print('Client sends R1:', client_random)
+            self.socket.send(client_random)
+
+            # 接收包含 R1 和 R2 的数据包
+            server_response = self.socket.recv(1024)
+
+            # 使用 SM2 验证服务器身份（验证 R1 的签名）
+            sm2_crypto = sm2.CryptSM2(public_key=self.framer.certificate_key)
+            server_sign = server_response[8:]
+            print("Client received server's signature on R1:", server_sign)
+
+            # 如果签名验证失败，拒绝连接并关闭
+            if not sm2_crypto.verify(server_sign, client_random):
+                print("Permission denied: Signature verification failed")
+                self.socket.send(b'Permission denied')
+                self.close()
+                return False
+            print("Server authentication successful!")
+
+            # 获取 R2（服务器的随机数）并生成 R2 的签名，发送给服务器
+            server_random = server_response[:8]
+            print("Client received R2:", server_random)
+            server_random_sign = self.framer.crypter_sm2.sign(server_random)
+            print("Client sends R2's signature:", server_random_sign)
+            self.socket.send(server_random_sign.encode())
+
+            end_time = time.time()
+            print("Authorization completed in {} seconds".format(end_time - start_time))
+
+            # 接收并验证权限消息
+            permission_message = self.socket.recv(1024).decode('utf-8')
+            if permission_message[0] != 'S':
+                print("Permission denied: Invalid permission message")
+                self.close()
+                return False
+
+            # ---------------------------- Key Agreement ---------------------------
+            print("----- Key Agreement ---------------------------------------------------")
+            start_time = time.time()
+
+            # 生成随机数 R3 和加密密钥 K
+            random_key_R3 = secrets.token_bytes(16)  # 16 字节的随机数
+            symmetric_key = secrets.token_bytes(16).hex()  # 生成一个16字节的密钥并转换为十六进制
+            print("[Client]: Generated random 16 bytes key R3 - {}".format(random_key_R3))
+
+            # 使用服务器的公钥加密 R3
+            encrypted_R3 = sm2_crypto.encrypt(random_key_R3)
+            print("[Client]: R3 encoded using server's public key - {}".format(encrypted_R3))
+
+            # 使用客户端的私钥对加密后的 R3 进行签名
+            encrypted_R3_sign = self.framer.crypter_sm2.sign(encrypted_R3, symmetric_key)
+            print("[Client]: Signed R3_encode with client's private key - {}".format(encrypted_R3_sign))
+
+            # 构建要发送的消息，包括 R3 的加密值和签名
+            key_agreement_message = encrypted_R3 + encrypted_R3_sign.encode("utf-8")
+            print("[Client]: Sending encoded and signed data - {}".format(key_agreement_message))
+
+            end_time = time.time()
+            self.socket.send(key_agreement_message)
+
+            # 接收服务器的响应
+            server_agreement_response = self.socket.recv(1024)
+            response_time_start = time.time()
+
+            # 解密并验证协议消息
+            decrypted_agreement_msg = self.framer.crypter_sm2.decrypt(server_agreement_response).decode('utf-8')
+            if decrypted_agreement_msg[0] == 'S':
+                self.framer.sm4_key = random_key_R3.hex()  # 将 R3 转换为 SM4 密钥
+            print("[Client]: Received agreement response - {}".format(decrypted_agreement_msg))
+            print("{}, sm4_key = {}".format(decrypted_agreement_msg, self.framer.sm4_key))
+
+            response_time_end = time.time()
+            print("Key agreement completed in {} seconds".format((response_time_end - start_time) - (response_time_start - end_time)))
+            print("-----------------------------------------------------------------------")
+        
         except socket.error as msg:
             _logger.error('Connection to (%s, %s) '
                           'failed: %s' % (self.host, self.port, msg))

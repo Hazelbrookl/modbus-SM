@@ -8,6 +8,8 @@ import serial
 import socket
 import ssl
 import traceback
+import random
+import time
 
 from pymodbus.constants import Defaults
 from pymodbus.utilities import hexlify_packets
@@ -19,6 +21,7 @@ from pymodbus.transaction import *
 from pymodbus.exceptions import NotImplementedException, NoSuchSlaveException
 from pymodbus.pdu import ModbusExceptions as merror
 from pymodbus.compat import socketserver, byte2int
+from gmssl import sm2, sm3, sm4
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -45,7 +48,10 @@ class ModbusBaseRequestHandler(socketserver.BaseRequestHandler):
         """
         _logger.debug("Client Connected [%s:%s]" % self.client_address)
         self.running = True
-        self.framer = self.server.framer(self.server.decoder, client=None)
+        self.framer = self.server.framer(self.server.decoder, client=None,
+                                         private_key=self.server.private_key, public_key=self.server.public_key,
+                                         sm4_key=self.server.sm4_key,
+                                         certificate_key=self.server.certificate_key)
         self.server.threads.append(self)
 
     def finish(self):
@@ -179,6 +185,75 @@ class ModbusConnectedRequestHandler(ModbusBaseRequestHandler):
         request handler class.
 
         """
+                    # authorization
+            # ---------------------------- Authorization ----------------------------
+        print("----- Authorization ---------------------------------------------------")
+        start_time = time.time()
+
+        # 接收客户端发送的 R1（客户端生成的随机数）
+        client_random = self.request.recv(1024)
+        print('Server received R1:', client_random)
+
+        # 对 R1 进行签名
+        R1_sign = self.framer.crypter_sm2.sign(client_random)
+        print('Server signs R1:', R1_sign)
+
+        # 服务器生成随机数 R2
+        server_random = random.randrange(1e10).to_bytes(8, byteorder="little", signed=False)
+        print('Server generated R2:', server_random)
+
+        # 将 R2 和 R1 的签名组合并发送给客户端
+        R1R2 = server_random + R1_sign.encode()
+        self.request.send(R1R2)
+
+        # ---------------------------- Verify Client Identity -------------------
+        # 使用 SM2 公钥验证客户端身份
+        sm2_crypto = sm2.CryptSM2(public_key=self.framer.certificate_key)
+        client_sign = self.request.recv(1024)
+
+        # 验证客户端身份，若验证失败则拒绝访问
+        if not sm2_crypto.verify(client_sign, server_random):
+            print("Permission denied: Client identity verification failed")
+            self.request.send(b'Permission denied')
+            return
+        print("Server successfully authenticated the client!")
+
+        end_time = time.time()
+        print("Authentication completed in {} seconds".format(end_time - start_time))
+
+        # 发送认证成功的消息给客户端
+        self.request.send(b'Successfully logged in')
+
+        # ---------------------------- Key Agreement ---------------------------
+        print("----- Key Agreement ---------------------------------------------------")
+        start_time = time.time()
+
+        # 接收客户端发送的密钥协商消息
+        agreement_message = self.request.recv(1024)
+        print("[Server]: Received agreement message - {}".format(agreement_message))
+
+        # 从收到的协议消息中提取 R3 的加密值和签名
+        encrypted_R3 = agreement_message[:16 * 7]  # 取前 16*7 字节作为加密后的 R3
+        encrypted_R3_sign = agreement_message[16 * 7:].decode("utf-8")  # 后面的部分为签名
+        print("[Server]: Extracted R3_encode - {}".format(encrypted_R3))
+        print("[Server]: Extracted signed R3_encode - {}".format(encrypted_R3_sign))
+
+        # 验证 R3 的签名
+        if not sm2_crypto.verify(encrypted_R3_sign, encrypted_R3):
+            print("Key agreement error, using default SM4 key")
+            self.request.send(sm2_crypto.encrypt(b'Key agreement error, using default key'))
+        else:
+            # 如果签名验证通过，则解密 R3，并更新 SM4 密钥
+            print("[Server]: Verification successful, proceeding with key agreement")
+            R3 = self.framer.crypter_sm2.decrypt(encrypted_R3)
+            self.framer.sm4_key = R3.hex()  # 将 R3 转换为 SM4 密钥
+            print("Key agreement successful, new sm4_key = {}".format(self.framer.sm4_key))
+            self.request.send(sm2_crypto.encrypt(b'Successfully obtained the key'))
+
+        end_time = time.time()
+        print("Key agreement completed in {} seconds".format(end_time - start_time))
+        print("-----------------------------------------------------------------------")
+
         reset_frame = False
         while self.running:
             try:
@@ -300,6 +375,7 @@ class ModbusTcpServer(socketserver.ThreadingTCPServer):
 
     def __init__(self, context, framer=None, identity=None,
                  address=None, handler=None, allow_reuse_address=False,
+                 private_key=None, public_key=None, certificate_key=None,
                  **kwargs):
         """ Overloaded initializer for the socket server
 
@@ -331,6 +407,9 @@ class ModbusTcpServer(socketserver.ThreadingTCPServer):
                                                 Defaults.IgnoreMissingSlaves)
         self.broadcast_enable = kwargs.pop('broadcast_enable',
                                            Defaults.broadcast_enable)
+        self.private_key = private_key
+        self.public_key = public_key
+        self.certificate_key = certificate_key
 
         if isinstance(identity, ModbusDeviceIdentification):
             self.control.Identity.update(identity)

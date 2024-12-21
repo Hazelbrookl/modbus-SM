@@ -1,8 +1,12 @@
 import struct
+import time
+import random
 from pymodbus.exceptions import ModbusIOException
 from pymodbus.exceptions import InvalidMessageReceivedException
 from pymodbus.utilities import hexlify_packets
 from pymodbus.framer import ModbusFramer, SOCKET_FRAME_HEADER
+from pymodbus.constants import Defaults
+from gmssl import sm2, sm3, sm4
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -34,7 +38,7 @@ class ModbusSocketFramer(ModbusFramer):
         * The -1 is to account for the uid byte
     """
 
-    def __init__(self, decoder, client=None):
+    def __init__(self, decoder, client=None, private_key=None, public_key=None, sm4_key=None, certificate_key=None):
         """ Initializes a new instance of the framer
 
         :param decoder: The decoder factory implementation to use
@@ -44,6 +48,13 @@ class ModbusSocketFramer(ModbusFramer):
         self._hsize = 0x07
         self.decoder = decoder
         self.client = client
+        if public_key and private_key:
+            self.crypter_sm2 = sm2.CryptSM2(private_key=private_key, public_key=public_key)
+        else:
+            self.crypter_sm2 = None
+        self.sm4_key = sm4_key
+        self.crypter_sm4 = sm4.CryptSM4()
+        self.certificate_key = certificate_key
 
     # ----------------------------------------------------------------------- #
     # Private Helper Functions
@@ -170,6 +181,22 @@ class ModbusSocketFramer(ModbusFramer):
         Process incoming packets irrespective error condition
         """
         data = self.getRawFrame() if error else self.getFrame()
+
+        if self.certificate_key:
+            # 签名部分
+            sign = data[-64:].hex()
+            # 数据部分
+            data = data[:-64]
+            print("Signature:", sign)
+            cpr = sm2.CryptSM2(public_key=self.trusted_public_key)
+            if not cpr.verify_with_sm3(sign, data):
+                raise InvalidMessageReceivedException('Unverified')
+            print("Verified")
+        
+        self.crypter_sm4.set_key(self.sm4_key.encode('utf-8'), sm4.SM4_DECRYPT)
+        value = self.crypter_sm4.crypt_cbc(Defaults.iv, data[1:])
+        data = data[0].to_bytes(1, 'big') + value
+
         result = self.decoder.decode(data)
         if result is None:
             raise ModbusIOException("Unable to decode request")
@@ -199,18 +226,40 @@ class ModbusSocketFramer(ModbusFramer):
         return self._buffer
 
     def buildPacket(self, message):
-        """ Creates a ready to send modbus packet
-
-        :param message: The populated request/response to send
         """
-        data = message.encode()
-        packet = struct.pack(SOCKET_FRAME_HEADER,
-                             message.transaction_id,
-                             message.protocol_id,
-                             len(data) + 2,
-                             message.unit_id,
-                             message.function_code)
-        packet += data
+        Creates a ready-to-send Modbus packet.
+
+        :param message: The populated request/response to send.
+        :return: The fully constructed and optionally signed Modbus packet.
+        """
+        # 使用 SM4 加密消息
+        self.crypter_sm4.set_key(self.sm4_key.encode('utf-8'), sm4.SM4_ENCRYPT)
+        encrypted_data = self.crypter_sm4.crypt_cbc(Defaults.iv, message.encode())
+
+        # 根据是否启用 SM2 签名确定签名长度
+        len_sign = 64 if self.crypter_sm2 else 0
+
+        # 构建 Modbus 数据包的头部
+        packet_header = struct.pack(
+            SOCKET_FRAME_HEADER,
+            message.transaction_id,  # 事务标识符
+            message.protocol_id,     # 协议标识符
+            len(encrypted_data) + len_sign + 2,  # 数据长度 + 签名长度 + 固定长度字段
+            message.unit_id,         # 单元标识符
+            message.function_code    # 功能码
+        )
+
+        # 组装完整的包（头部 + 加密数据）
+        packet = packet_header + encrypted_data
+
+        # 如果启用了 SM2 签名功能，对功能码和消息加签
+        if self.crypter_sm2:
+            # 签名从功能码开始到整个消息的结束部分
+            data_to_sign = packet[len(packet_header) - 1:]
+            sign = self.crypter_sm2.sign_with_sm3(data_to_sign)  # 使用 SM3 签名
+            print("Signature:", sign)
+            packet += bytes.fromhex(sign)  # 将签名附加到包的末尾
+
         return packet
 
 
